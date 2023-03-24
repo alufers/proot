@@ -291,4 +291,3 @@ ifdef PROOT_UNBUNDLE_LOADER
 	$(INSTALL) -D loader/loader $(LOADERDIR)/loader
 	$(INSTALL) -D loader/loader-m32 $(LOADERDIR)/loader32
 endif
-endif

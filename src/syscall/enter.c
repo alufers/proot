@@ -396,7 +396,6 @@ int translate_syscall_enter(Tracee *tracee)
 	case PR_fchownat:
 	case PR_fstatat64:
 	case PR_newfstatat:
-	case PR_statx:
 	case PR_utimensat:
 	case PR_utimensat_time64:
 	case PR_name_to_handle_at:
