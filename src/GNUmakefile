@@ -61,11 +61,13 @@ OBJECTS += \
 	tracee/reg.o		\
 	tracee/event.o		\
 	tracee/seccomp.o        \
+	tracee/statx.o		\
 	ptrace/ptrace.o		\
 	ptrace/user.o		\
 	ptrace/wait.o		\
 	compat/fnmatch.o \
 	extension/extension.o \
+	extension/ashmem_memfd/ashmem_memfd.o \
 	extension/kompat/kompat.o \
 	extension/fake_id0/chown.o \
 	extension/fake_id0/chroot.o \
@@ -87,6 +89,10 @@ OBJECTS += \
 	extension/fake_id0/fake_id0.o \
 	extension/hidden_files/hidden_files.o \
 	extension/port_switch/port_switch.o \
+	extension/sysvipc/sysvipc.o \
+	extension/sysvipc/sysvipc_msg.o \
+	extension/sysvipc/sysvipc_sem.o \
+	extension/sysvipc/sysvipc_shm.o \
 	extension/link2symlink/link2symlink.o \
 	extension/fix_symlink_size/fix_symlink_size.o \
 	extension/tcsetsf2tcsets/tcsetsf2tcsets.o \
@@ -284,4 +290,5 @@ uninstall:
 ifdef PROOT_UNBUNDLE_LOADER
 	$(INSTALL) -D loader/loader $(LOADERDIR)/loader
 	$(INSTALL) -D loader/loader-m32 $(LOADERDIR)/loader32
+endif
 endif

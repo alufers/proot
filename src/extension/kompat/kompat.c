@@ -315,6 +315,14 @@ static int handle_sysenter_end(Tracee *tracee, Config *config)
 
 		if (config->actual_release == 0)
 			return 0;
+		flags = peek_reg(tracee, CURRENT, SYSARG_4);
+		if ((flags & ~(
+						AT_SYMLINK_NOFOLLOW|
+						AT_NO_AUTOMOUNT|
+						AT_EMPTY_PATH|
+						0x6000 /* AT_STATX_SYNC_TYPE aka. KSTAT_QUERY_FLAGS */
+					)) != 0)
+			return -EINVAL; /* Exposed by LTP.  */
 
 		flags = peek_reg(tracee, CURRENT, SYSARG_4);
 #if defined(ARCH_X86_64)

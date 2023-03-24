@@ -38,6 +38,7 @@
 #include "tracee/mem.h"
 #include "tracee/abi.h"
 #include "tracee/seccomp.h"
+#include "tracee/statx.h"
 #include "path/path.h"
 #include "ptrace/ptrace.h"
 #include "ptrace/wait.h"
@@ -69,6 +70,13 @@ void translate_syscall_exit(Tracee *tracee)
 	if (tracee->status < 0) {
 		poke_reg(tracee, SYSARG_RESULT, (word_t) tracee->status);
 		goto end;
+	}
+
+	/* If proot changed syscall to PR_void during enter,
+	 * keep syscall result set during entry. */
+	if (peek_reg(tracee, MODIFIED, SYSARG_NUM) == SYSCALL_AVOIDER &&
+			peek_reg(tracee, ORIGINAL, SYSARG_NUM) != SYSCALL_AVOIDER) {
+		poke_reg(tracee, SYSARG_RESULT, peek_reg(tracee, MODIFIED, SYSARG_RESULT));
 	}
 
 	/* Translate output arguments:
@@ -365,6 +373,18 @@ void translate_syscall_exit(Tracee *tracee)
 		/* The only place where we need to do something with symlinks.  */
 		if (referer == NULL || strncmp(referer, "/proc/", 6) != 0)
 			goto end;
+		if (status == 1) {
+			/* Empty path was passed (""),
+			 * indicating that path is pointed to by fd passed in first argument */
+			word_t dirfd = peek_reg(tracee, ORIGINAL, SYSARG_1);
+			if (syscall_number == PR_readlink || dirfd < 0) {
+				status = -EBADF;
+				break;
+			}
+			status = readlink_proc_pid_fd(tracee->pid, dirfd, referer);
+			if (status < 0)
+				break;
+		}
 
 		status = detranslate_path(tracee, referee, referer);
 		if (status < 0)
@@ -502,7 +522,8 @@ void translate_syscall_exit(Tracee *tracee)
 			 * little endian, it will need only first 4 bytes to be modified,
 			 * as next 4 bytes will always be 0))
 			 * */
-			int write_status = write_data(tracee, peek_reg(tracee, ORIGINAL, SYSARG_2), "\x94\x19\x02\x01", 4);
+			word_t stat_addr = peek_reg(tracee, ORIGINAL, syscall_number == PR_statfs64 ? SYSARG_3 : SYSARG_2);
+			int write_status = write_data(tracee, stat_addr, "\x94\x19\x02\x01", 4);
 			if (write_status < 0) {
 				VERBOSE(tracee, 5, "Updating statfs() result failed");
 			}
@@ -513,6 +534,10 @@ void translate_syscall_exit(Tracee *tracee)
 
 		goto end;
 	}
+
+	case PR_statx:
+		status = handle_statx_syscall(tracee, false);
+		break;
 
 	default:
 		goto end;

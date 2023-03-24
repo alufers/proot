@@ -261,6 +261,7 @@ typedef struct tracee {
 	/* Path to the executable, à la /proc/self/exe.  */
 	char *exe;
 	char *new_exe;
+	char *host_exe;
 
 
 	/**********************************************************************
@@ -269,6 +270,7 @@ typedef struct tracee {
 
 	/* Runner command-line.  */
 	char **qemu;
+	bool skip_proot_loader;
 
 	/* Path to glue between the guest rootfs and the host rootfs.  */
 	const char *glue;
@@ -307,5 +309,8 @@ extern void terminate_tracee(Tracee *tracee);
 extern void free_terminated_tracees();
 extern int swap_config(Tracee *tracee1, Tracee *tracee2);
 extern void kill_all_tracees();
+
+typedef LIST_HEAD(tracees, tracee) Tracees;
+extern Tracees *get_tracees_list_head();
 
 #endif /* TRACEE_H */

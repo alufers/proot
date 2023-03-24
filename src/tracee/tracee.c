@@ -45,7 +45,6 @@
 
 #include "compat.h"
 
-typedef LIST_HEAD(tracees, tracee) Tracees;
 static Tracees tracees;
 
 
@@ -456,6 +455,8 @@ int new_child(Tracee *parent, word_t clone_flags)
 	if (child->heap == NULL)
 		return -ENOMEM;
 
+	child->load_info = talloc_reference(child, parent->load_info);
+
 	/* If CLONE_PARENT is set, then the parent of the new child
 	 * (as returned by getppid(2)) will be the same as that of the
 	 * calling process.
@@ -632,4 +633,8 @@ void kill_all_tracees()
 
 	LIST_FOREACH(tracee, &tracees, link)
 		kill(tracee->pid, SIGKILL);
+}
+
+Tracees *get_tracees_list_head() {
+	return &tracees;
 }

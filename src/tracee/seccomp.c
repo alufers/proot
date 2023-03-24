@@ -6,6 +6,7 @@
 #include <string.h>    /* memset   */
 #include <linux/net.h> /* SYS_SENDMMSG */
 #include <assert.h>    /* assert(3), */
+#include <time.h>      /* time(2), */
 
 #include "extension/extension.h"
 #include "cli/note.h"
@@ -13,6 +14,7 @@
 #include "syscall/syscall.h"
 #include "tracee/seccomp.h"
 #include "tracee/mem.h"
+#include "tracee/statx.h"
 #include "path/path.h"
 
 static int handle_seccomp_event_common(Tracee *tracee);
@@ -25,10 +27,11 @@ static int handle_seccomp_event_common(Tracee *tracee);
  * so SIGSYS handler sees untranslated paths and should leave
  * them untranslated.
  */
-static void restart_syscall_after_seccomp(Tracee* tracee) {
+void restart_syscall_after_seccomp(Tracee* tracee) {
 	word_t instr_pointer;
 
-	/* Enable restore regs at end of replaced call.  */
+	/* Enable restore regs at end of replaced call.
+	 * This also defers delivering of signals until restarted syscall finishes.  */
 	tracee->restore_original_regs_after_seccomp_event = true;
 	tracee->restart_how = PTRACE_SYSCALL;
 
@@ -53,7 +56,8 @@ static void restart_syscall_after_seccomp(Tracee* tracee) {
 /**
  * Set specified result (negative for errno) and do not restart syscall.
  */
-static void set_result_after_seccomp(Tracee *tracee, word_t result) {
+void set_result_after_seccomp(Tracee *tracee, word_t result) {
+	VERBOSE(tracee, 3, "Setting result after SIGSYS to 0x%lx", result);
 	poke_reg(tracee, SYSARG_RESULT, result);
 	push_specific_regs(tracee, false);
 }
@@ -130,6 +134,10 @@ static int handle_seccomp_event_common(Tracee *tracee)
 		set_result_after_seccomp(tracee, 0);
 		return 0;
 	}
+	if (status == 2) {
+		VERBOSE(tracee, 4, "SIGSYS fully handled by an extension with result set");
+		return 0;
+	}
 
 	switch (sysnum) {
 	case PR_open:
@@ -200,11 +208,12 @@ static int handle_seccomp_event_common(Tracee *tracee)
 		restart_syscall_after_seccomp(tracee);
 		break;
 
+	case PR_unlink:
 	case PR_rmdir:
 		set_sysnum(tracee, PR_unlinkat);
 		poke_reg(tracee, SYSARG_2, peek_reg(tracee, CURRENT, SYSARG_1));
 		poke_reg(tracee, SYSARG_1, AT_FDCWD);
-		poke_reg(tracee, SYSARG_3, AT_REMOVEDIR);
+		poke_reg(tracee, SYSARG_3, sysnum==PR_rmdir ? AT_REMOVEDIR : 0);
 		restart_syscall_after_seccomp(tracee);
 		break;
 
@@ -385,6 +394,168 @@ static int handle_seccomp_event_common(Tracee *tracee)
 		break;
 	}
 #endif
+
+	case PR_stat:
+	case PR_lstat:
+		set_sysnum(tracee, PR_newfstatat);
+		poke_reg(tracee, SYSARG_4, sysnum == PR_lstat ? AT_SYMLINK_NOFOLLOW : 0);
+		poke_reg(tracee, SYSARG_3, peek_reg(tracee, CURRENT, SYSARG_2));
+		poke_reg(tracee, SYSARG_2, peek_reg(tracee, CURRENT, SYSARG_1));
+		poke_reg(tracee, SYSARG_1, AT_FDCWD);
+		restart_syscall_after_seccomp(tracee);
+		break;
+
+	case PR_pipe:
+		set_sysnum(tracee, PR_pipe2);
+		poke_reg(tracee, SYSARG_2, 0);
+		restart_syscall_after_seccomp(tracee);
+		break;
+
+	case PR_dup2:
+		set_sysnum(tracee, PR_dup3);
+		poke_reg(tracee, SYSARG_3, 0);
+		restart_syscall_after_seccomp(tracee);
+		break;
+
+	case PR_access:
+		set_sysnum(tracee, PR_faccessat);
+		poke_reg(tracee, SYSARG_4, 0);
+		poke_reg(tracee, SYSARG_3, peek_reg(tracee, CURRENT, SYSARG_2));
+		poke_reg(tracee, SYSARG_2, peek_reg(tracee, CURRENT, SYSARG_1));
+		poke_reg(tracee, SYSARG_1, AT_FDCWD);
+		restart_syscall_after_seccomp(tracee);
+		break;
+
+	case PR_mkdir:
+		set_sysnum(tracee, PR_mkdirat);
+		poke_reg(tracee, SYSARG_3, peek_reg(tracee, CURRENT, SYSARG_2));
+		poke_reg(tracee, SYSARG_2, peek_reg(tracee, CURRENT, SYSARG_1));
+		poke_reg(tracee, SYSARG_1, AT_FDCWD);
+		restart_syscall_after_seccomp(tracee);
+		break;
+
+	case PR_rename:
+		set_sysnum(tracee, PR_renameat);
+		poke_reg(tracee, SYSARG_4, peek_reg(tracee, CURRENT, SYSARG_2));
+		poke_reg(tracee, SYSARG_3, AT_FDCWD);
+		poke_reg(tracee, SYSARG_2, peek_reg(tracee, CURRENT, SYSARG_1));
+		poke_reg(tracee, SYSARG_1, AT_FDCWD);
+		restart_syscall_after_seccomp(tracee);
+		break;
+
+	case PR_select:
+	{
+		// TODO: This doesn't update timeout with time spent inside select(2)
+		//       after returning from syscall
+		word_t timeval_arg = peek_reg(tracee, CURRENT, SYSARG_5);
+		word_t timespec_arg = 0;
+		if (timeval_arg != 0) {
+			struct timeval tv = {};
+			if (read_data(tracee, &tv, timeval_arg, sizeof(tv))) {
+				set_result_after_seccomp(tracee, -EFAULT);
+				break;
+			}
+			if (tv.tv_usec >= 1000000 || tv.tv_usec < 0) {
+				set_result_after_seccomp(tracee, -EINVAL);
+				break;
+			}
+			struct timespec ts = {
+				.tv_sec = tv.tv_sec,
+				.tv_nsec = tv.tv_usec * 1000
+			};
+			timespec_arg = alloc_mem(tracee, sizeof(ts));
+			if(write_data(tracee, timespec_arg, &ts, sizeof(ts))) {
+				set_result_after_seccomp(tracee, -EFAULT);
+				break;
+			}
+		}
+		set_sysnum(tracee, PR_pselect6);
+		poke_reg(tracee, SYSARG_5, timespec_arg);
+		poke_reg(tracee, SYSARG_6, 0);
+		restart_syscall_after_seccomp(tracee);
+		break;
+	}
+
+	case PR_poll:
+	{
+		int ms_arg = (int) peek_reg(tracee, CURRENT, SYSARG_3);
+		word_t timespec_arg = 0;
+		if (ms_arg >= 0) {
+			struct timespec ts = {
+				.tv_sec = ms_arg / 1000,
+				.tv_nsec = (ms_arg % 1000) * 1000000
+			};
+			timespec_arg = alloc_mem(tracee, sizeof(ts));
+			if(write_data(tracee, timespec_arg, &ts, sizeof(ts))) {
+				set_result_after_seccomp(tracee, -EFAULT);
+				break;
+			}
+		}
+		set_sysnum(tracee, PR_ppoll);
+		poke_reg(tracee, SYSARG_3, timespec_arg);
+		poke_reg(tracee, SYSARG_4, 0);
+		poke_reg(tracee, SYSARG_5, 0);
+		restart_syscall_after_seccomp(tracee);
+		break;
+	}
+
+	case PR_time:
+	{
+		time_t t = time(NULL);
+		word_t addr = peek_reg(tracee, CURRENT, SYSARG_1);
+		errno = 0;
+		if (addr != 0) {
+			poke_word(tracee, addr, t);
+		}
+		set_result_after_seccomp(tracee, errno ? -EFAULT : t);
+		break;
+	}
+
+	case PR_statx:
+	{
+		set_result_after_seccomp(tracee, handle_statx_syscall(tracee, true));
+		break;
+	}
+
+	case PR_ftruncate:
+	{
+		if (detranslate_sysnum(get_abi(tracee), PR_ftruncate64) == SYSCALL_AVOIDER) {
+			set_result_after_seccomp(tracee, -ENOSYS);
+			break;
+		}
+		set_sysnum(tracee, PR_ftruncate64);
+		poke_reg(tracee, SYSARG_3, peek_reg(tracee, CURRENT, SYSARG_2));
+		poke_reg(tracee, SYSARG_2, 0);
+		poke_reg(tracee, SYSARG_4, 0);
+		restart_syscall_after_seccomp(tracee);
+		break;
+	}
+
+	case PR_setresuid:
+	case PR_setresgid:
+	{
+		gid_t rxid, exid, sxid, rxid_, exid_, sxid_;
+		rxid = peek_reg(tracee, CURRENT, SYSARG_1);
+		exid = peek_reg(tracee, CURRENT, SYSARG_2);
+		sxid = peek_reg(tracee, CURRENT, SYSARG_3);
+		if (sysnum == PR_setresuid)
+			ret = getresuid(&rxid_, &exid_, &sxid_);
+		else if (sysnum == PR_setresgid)
+			ret = getresgid(&rxid_, &exid_, &sxid_);
+		if (ret) {  // EFAULT = address outside address space
+			set_result_after_seccomp(tracee, -EPERM);
+			break;
+		}
+		ret = 0;
+		if (rxid != rxid_ && rxid != -1)
+			ret = -EPERM;
+		if (exid != exid_ && exid != -1)
+			ret = -EPERM;
+		if (sxid != sxid_ && sxid != -1)
+			ret = -EPERM;
+		set_result_after_seccomp(tracee, ret);
+		break;
+	}
 
 	case PR_set_robust_list:
 	default:
